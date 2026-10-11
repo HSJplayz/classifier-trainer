@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>classifier-trainer</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --ink:#e6e8ee; --muted:#9aa0ad;
+    --accent:#4f8cff; --line:#262b36; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif; padding:28px; }
+  main { max-width:1080px; margin:0 auto; }
+  h1 { font-size:1.6rem; margin:0 0 4px; }
+  h2 { font-size:1.1rem; border-bottom:1px solid var(--line); padding-bottom:6px; margin:26px 0 12px; }
+  .muted { color:var(--muted); font-size:.86rem; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-top:16px; }
+  label { display:block; font-size:.84rem; color:var(--muted); margin:10px 0 4px; }
+  textarea, input[type=number], select { width:100%; background:var(--bg); color:var(--ink);
+    border:1px solid var(--line); border-radius:8px; padding:8px; font:inherit; }
+  textarea { min-height:140px; font-family:ui-monospace,Consolas,monospace; font-size:.8rem; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .row > div { flex:1; min-width:120px; }
+  .feats { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:6px; font-size:.9rem; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 18px;
+    font-weight:600; font-size:.95rem; cursor:pointer; margin-top:14px; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px; }
+  .card .n { font-size:1.3rem; font-weight:700; }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:780px){ .grid-2 { grid-template-columns:1fr; } }
+  table { width:100%; border-collapse:collapse; font-size:.88rem; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; }
+  .err { color:#f85149; background:var(--card); border:1px solid #f85149; border-radius:8px; padding:10px; margin-top:12px; }
+  #loading { display:none; color:#f0b429; margin-top:12px; }
+  svg { width:100%; height:auto; background:var(--bg); border:1px solid var(--line); border-radius:10px; }
+  .swatch { display:inline-block; width:11px; height:11px; border-radius:3px; margin-right:5px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<main>
+  <h1>classifier-trainer</h1>
+  <p class="muted">Logistic regression, Gaussian naive Bayes, and k-NN from scratch (numpy). Paste a CSV, pick a class target, train — charts render locally, no CDN.</p>
+
+  <div class="panel">
+    <label>CSV data (header row required; generated sample loads automatically)</label>
+    <textarea id="csv" spellcheck="false"></textarea>
+
+    <div class="row">
+      <div><label>Target (class)</label><select id="target"></select></div>
+      <div><label>Model</label>
+        <select id="model">
+          <option value="logistic">logistic regression</option>
+          <option value="gnb">gaussian naive bayes</option>
+          <option value="knn">k-nearest neighbours</option>
+        </select>
+      </div>
+      <div><label>k (k-NN)</label><input type="number" id="k" value="5" min="1" max="25" step="1"></div>
+      <div><label>Test fraction</label><input type="number" id="test_size" value="0.25" min="0.1" max="0.5" step="0.05"></div>
+      <div><label>Compare all (CV folds)</label><input type="number" id="cv" min="2" max="15" step="1" placeholder="off"></div>
+    </div>
+
+    <label>Features (auto = all numeric except target)</label>
+    <div id="features" class="feats"></div>
+
+    <button id="train">Train</button>
+    <div id="loading">Training…</div>
+    <div id="error"></div>
+  </div>
+
+  <h2>Metrics</h2>
+  <div id="metriccards" class="cards"></div>
+
+  <div class="grid-2">
+    <div>
+      <h2>Confusion matrix (test set)</h2>
+      <p class="muted">Rows = actual, columns = predicted. Diagonal = correct.</p>
+      <div id="confusion"></div>
+    </div>
+    <div>
+      <h2>Per-class metrics (test)</h2>
+      <div id="perclass"></div>
+    </div>
+  </div>
+
+  <div id="boundaryw" style="display:none">
+    <h2>Decision boundary (two features)</h2>
+    <p class="muted">Background = model's predicted region; dots = test points, outlined red when misclassified.</p>
+    <div id="boundary"></div>
+  </div>
+
+  <div id="comparew" style="display:none">
+    <h2>Model comparison (cross-validated accuracy)</h2>
+    <div id="compare"></div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const PALETTE = ["#4f8cff", "#3fb950", "#f0b429", "#f85149", "#d2a8ff", "#79c0ff", "#ffa657"];
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function gauss(rng) {
+  let u = 0, v = 0;
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+function sampleData() {
+  const rng = mulberry32(7);
+  const centers = { setosa: [0, 0], versicolor: [4.0, 0.6], virginica: [2.0, 4.0] };
+  const lines = ["x1,x2,species"];
+  for (const [name, c] of Object.entries(centers)) {
+    for (let i = 0; i < 15; i++) {
+      const a = c[0] + gauss(rng) * 0.85, b = c[1] + gauss(rng) * 0.85;
+      lines.push(`${a.toFixed(2)},${b.toFixed(2)},${name}`);
+    }
+  }
+  return lines.join("\n");
+}
+$("csv").value = sampleData();
+
+function headers(text) {
+  const m = text.match(/^(.*?)\r?\n/);
+  return m ? m[1].split(",").map(s => s.trim()).filter(Boolean) : [];
+}
+function refreshColumns() {
+  const cols = headers($("csv").value);
+  const sel = $("target");
+  const prev = sel.value;
+  sel.innerHTML = cols.map(c => `<option>${c}</option>`).join("");
+  if (prev && cols.includes(prev)) sel.value = prev;
+  else sel.value = cols[cols.length - 1] || "";
+  const feats = $("features");
+  feats.innerHTML = cols.map(c =>
+    `<label style="display:flex;align-items:center;gap:5px;margin:0;min-width:100px">
+       <input type="checkbox" value="${c}" ${c !== sel.value ? "" : "disabled"}> ${c}</label>`).join("");
+  feats.querySelectorAll("input:not([disabled])").forEach(i => i.checked = true);
+}
+$("csv").addEventListener("input", refreshColumns);
+$("target").addEventListener("change", refreshColumns);
+refreshColumns();
+
+function esc(s) { return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])); }
+function svg(w, h, inner) { return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${inner}</svg>`; }
+
+$("train").addEventListener("click", async () => {
+  const btn = $("train");
+  btn.disabled = true; $("loading").style.display = "block"; $("error").innerHTML = "";
+  const features = [...$("features").querySelectorAll("input:checked")].map(i => i.value);
+  const body = {
+    csv: $("csv").value, target: $("target").value, features,
+    model: $("model").value, k: parseInt($("k").value, 10) || 5,
+    test_size: parseFloat($("test_size").value) || 0.25, seed: 42
+  };
+  const cv = parseInt($("cv").value, 10);
+  if (cv) { body.compare = true; body.cv = cv; }
+  try {
+    const res = await fetch("/api/train", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "training failed");
+    render(data);
+  } catch (err) {
+    $("error").innerHTML = `<div class="err">${esc(err.message)}</div>`;
+  } finally {
+    btn.disabled = false; $("loading").style.display = "none";
+  }
+});
+
+function render(data) {
+  const tr = data.metrics_train, te = data.metrics_test;
+  const cards = [
+    ["Test accuracy", (te.accuracy * 100).toFixed(1) + "%"],
+    ["Train accuracy", (tr.accuracy * 100).toFixed(1) + "%"],
+    ["Classes", data.overview.classes.length],
+    ["Test rows", data.overview.n_test],
+    ["Macro F1", te.macro.f1.toFixed(3)],
+    ["Weighted F1", te.weighted.f1.toFixed(3)],
+  ].map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div class="n">${v}</div></div>`).join("");
+  $("metriccards").innerHTML = cards;
+
+  $("confusion").innerHTML = confusionSvg(te);
+  const rows = te.classes.map((c, i) => `<tr><td><span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>${esc(c.label)}</td>
+    <td>${c.precision}</td><td>${c.recall}</td><td>${c.f1}</td><td>${c.support}</td></tr>`).join("");
+  $("perclass").innerHTML = `<table><thead><tr><th>class</th><th>prec</th><th>recall</th><th>f1</th><th>n</th></tr></thead><tbody>${rows}
+    <tr><td><strong>macro</strong></td><td>${te.macro.precision}</td><td>${te.macro.recall}</td><td>${te.macro.f1}</td><td>${te.macro.support}</td></tr></tbody></table>`;
+
+  if (data.boundary && data.points) {
+    $("boundaryw").style.display = "block";
+    $("boundary").innerHTML = boundarySvg(data);
+  } else {
+    $("boundaryw").style.display = "none";
+  }
+
+  if (data.compare) {
+    $("comparew").style.display = "block";
+    const names = Object.keys(data.compare).sort((a, b) => data.compare[b].mean - data.compare[a].mean);
+    $("compare").innerHTML = `<table><thead><tr><th>model</th><th>CV accuracy</th><th>mean ± std</th><th>folds</th></tr></thead><tbody>` +
+      names.map(n => `<tr><td>${esc(n)}</td><td>${(data.compare[n].mean * 100).toFixed(1)}%</td>
+        <td>${data.compare[n].mean} ± ${data.compare[n].std}</td><td>${data.compare[n].scores.map(s => (s * 100).toFixed(0) + "%").join(", ")}</td></tr>`).join("") +
+      `</tbody></table>`;
+  } else {
+    $("comparew").style.display = "none";
+  }
+}
+
+function confusionSvg(report) {
+  const labels = report.labels, m = report.matrix, n = labels.length;
+  const max = Math.max(1, ...m.flat());
+  const cell = 52, pad = 90, W = pad + cell * n + 20, H = pad + cell * n + 20;
+  let inner = "";
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      const v = m[r][c], t = v / max;
+      const x = pad + c * cell, y = pad + r * cell;
+      const col = r === c ? `rgba(63,185,80,${0.25 + 0.7 * t})` : `rgba(248,81,73,${0.2 + 0.7 * t})`;
+      inner += `<rect x="${x}" y="${y}" width="${cell - 4}" height="${cell - 4}" rx="5" fill="${col}" stroke="#262b36"/>`;
+      inner += `<text x="${x + cell / 2 - 2}" y="${y + cell / 2 + 4}" text-anchor="middle" fill="#e6e8ee" font-size="14">${v}</text>`;
+    }
+  }
+  for (let c = 0; c < n; c++) inner += `<text x="${pad + c * cell + cell / 2 - 2}" y="${pad - 10}" text-anchor="middle" fill="#9aa0ad" font-size="11">${esc(labels[c])}</text>`;
+  for (let r = 0; r < n; r++) inner += `<text x="${pad - 10}" y="${pad + r * cell + cell / 2 + 4}" text-anchor="end" fill="#9aa0ad" font-size="11">${esc(labels[r])}</text>`;
+  inner += `<text x="${pad}" y="20" fill="#9aa0ad" font-size="11">predicted →</text>`;
+  return svg(W, H, inner);
+}
+
+function boundarySvg(data) {
+  const b = data.boundary, p = data.points;
+  const W = 560, H = 380, PAD = 40;
+  const xat = v => PAD + (v - b.xmin) / (b.xmax - b.xmin) * (W - PAD - 12);
+  const yat = v => (H - PAD) - (v - b.ymin) / (b.ymax - b.ymin) * (H - PAD - 12);
+  const cw = (W - PAD - 12) / b.nx, ch = (H - PAD - 12) / b.ny;
+  let inner = "";
+  for (let r = 0; r < b.ny; r++) {
+    const yv = b.ymin + (r + 0.5) / b.ny * (b.ymax - b.ymin);
+    for (let c = 0; c < b.nx; c++) {
+      const cls = b.grid[r][c];
+      const xv = b.xmin + (c + 0.5) / b.nx * (b.xmax - b.xmin);
+      inner += `<rect x="${xat(xv) - cw / 2}" y="${yat(yv) - ch / 2}" width="${cw + 0.6}" height="${ch + 0.6}" fill="${PALETTE[cls % PALETTE.length]}" opacity="0.16"/>`;
+    }
+  }
+  inner += `<line x1="${PAD}" y1="${H - PAD}" x2="${W - 12}" y2="${H - PAD}" stroke="#3a4252"/>
+            <line x1="${PAD}" y1="12" x2="${PAD}" y2="${H - PAD}" stroke="#3a4252"/>`;
+  p.x.forEach((xv, i) => {
+    const wrong = p.pred[i] !== p.true[i];
+    inner += `<circle cx="${xat(xv)}" cy="${yat(p.y[i])}" r="4.5" fill="${PALETTE[p.true[i] % PALETTE.length]}" stroke="${wrong ? "#f85149" : "#0f1115"}" stroke-width="${wrong ? 2.5 : 1}"/>`;
+  });
+  return svg(W, H, inner);
+}
+</script>
+</body>
+</html>
